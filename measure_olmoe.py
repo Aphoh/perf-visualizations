@@ -64,13 +64,20 @@ modeling_olmoe.OlmoeSparseMoeBlock = OlmoeSparseMoeBlock
 
 def main():
     # load data mix
-    dataset = datasets.load_dataset("Salesforce/wikitext", name="wikitext-2-v1", split="validation")
+    dataset = datasets.load_dataset("EleutherAI/wikitext_document_level", name="wikitext-2-v1", split="validation")
     tokenizer = AutoTokenizer.from_pretrained("allenai/OLMoE-1B-7B-0924")
     # tokenize
-    dataset = dataset.map(lambda x: tokenizer(x["text"], truncation=True, padding="max_length", max_length=512), batched=True)
-    batch_size = 32
+    req_length = 512
+    dataset = dataset.map(lambda x: tokenizer(x["page"], truncation=True, max_length=req_length), batched=True)
+    dataset = dataset.filter(lambda x: len(x["input_ids"]) == req_length)
+    batch_size = 4
     # create dataloader
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    def collate_fn(batch):
+        return {
+            "input_ids": torch.stack([torch.tensor(x["input_ids"]) for x in batch]),
+            "attention_mask": torch.stack([torch.tensor(x["attention_mask"]) for x in batch]),
+        }
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True, drop_last=True)
     # load model
     device = "cpu"
     if torch.cuda.is_available():
@@ -78,12 +85,22 @@ def main():
     elif torch.backends.mps.is_available():
         device = "mps" 
     device = torch.device(device)
-    model = modeling_olmoe.OlmoeForCausalLM.from_pretrained("allenai/OLMoE-1B-7B-0924", device_map={"": device})
-    
+    model = modeling_olmoe.OlmoeForCausalLM.from_pretrained("allenai/OLMoE-1B-7B-0924", device_map="auto", torch_dtype=torch.float16)
+    for batch in dataloader:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        # forward pass
+        with torch.inference_mode():
+            model(input_ids, attention_mask=attention_mask)
 
-
-
-    pass
+    global selected_inds
+    num_layers = model.config.num_hidden_layers
+    num_experts = model.config.num_experts_per_tok 
+    num_batches = len(dataloader)
+    stacked = torch.stack(selected_inds, dim=0)
+    selected_inds = stacked.view((num_batches, num_layers, batch_size, req_length, num_experts))
+    torch.save(selected_inds, "selected_experts.pt")
+    print("Selected experts saved to selected_experts.pt")
 
 
 if __name__ == "__main__":
