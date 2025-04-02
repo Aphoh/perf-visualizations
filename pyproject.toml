@@ -14,4 +14,5 @@ dependencies = [
     "torch>=2.6.0",
     "datasets",
     "accelerate",
+    "ipykernel",
 ]
